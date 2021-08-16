@@ -168,4 +168,4 @@ targetscan.sort_values(by='targetscan_weighted_context_score_norm', inplace=True
 targetscan['original_gene_symbol'] = targetscan['symbol']
 targetscan['original_mirbase_id'] = targetscan['mirdip4_mirbase_id']
 targetscan = targetscan.drop_duplicates()
-targetscan.to_csv('/home/waddelld/rnatools/mirdip5/resources_redo_final/targetscan.txt', sep='\t',index=False,header=True, quoting=csv.QUOTE_MINIMAL)
+targetscan.to_csv('/home/waddelld/rnatools/mirdip5/resources_redo_final/targetscan.txt', sep='\t',index=False,header=False, quoting=csv.QUOTE_MINIMAL)
