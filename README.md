@@ -1,45 +1,9 @@
-# mirdip5 pipeline
+# MirDIP 5.2 update: tissue context annotation and novel microRNA curation
 
-Runs according to `nextflow.config` configuration file, which controls things such as the source data directory, the benchmark/evaluation pairs, etc. It is crucial to update the `params` block of this configuration file in full to ensure correct results:
+> https://ophid.utoronto.ca/mirDIP
 
-```groovy
-params {
-  scores_path = "/home/waddelld/rnatools/mirdip5/resources_map_these_ids"
-  convert_mirbase_id_script = "/home/waddelld/rnatools/mirdip5/scripts/convert_mirbase_ids.R"
-  update_data_source_ids_script = "/home/waddelld/rnatools/mirdip5/scripts/mirdip5_update_data_source_ids.py"
-  hgnc_symbol_check_results = "/home/waddelld/rnatools/mirdip5/old_and_mirnatip_mirzag_targetscan_id_mapping.csv"
-  updated_ids_folder = "/home/waddelld/rnatools/mirdip5/ids_updated"
-  update_gene_symbols_script = "/home/waddelld/rnatools/mirdip5/scripts/update_gene_symbols.py"
-  benchmark_script_path = "/home/waddelld/rnatools/mirdip5/scripts/mirdip5_bench_one_file.R"
-  bench_collection = "/home/waddelld/rnatools/mirdip5/benchmarks_OLD_AND_ID_ISSUE"
-  bench_style = "benchmark"
-  gold_standard = '/home/waddelld/rnatools/mirdip5/plat_large_three_cols_only.tsv'
-  integrate_and_plot_script = "/home/waddelld/rnatools/mirdip5/scripts/mirdip5_integrate_and_plot_benchmarks.R"
-  prec_recall_pdf = '/home/waddelld/rnatools/mirdip5/mirdip5_benchmarks.pdf'
-  noisyor_script = "/home/waddelld/rnatools/mirdip5/scripts/mirdip5_run_noisyOR.R"
-  integrated_score_file = "mirdip5_integrated_scores.txt"
-}
-```
+The close interplay of microRNAs and genes critically influences diverse biological processes, and has led to an increased interest in studying them in the context of tissue-specific and disease-related mechanisms. MirDIP is a well-established database that aggregates microRNA-gene interactions from multiple databases to increase coverage, reduce bias, and improve usability by providing an integrated score proportional to the probability of the interaction occurring. We ensure high-quality microRNA-gene associations that can be applied across a broad spectrum of research by accurate characterization and additional annotation of source data. Therefore, in version 5.2, we removed eight outdated resources, added a new resource (miRNATIP), and ran five prediction algorithms for miRBase and mirGeneDB. In total, mirDIP 5.2 includes 46,364,047 predictions for 27,936 genes and 2,734 microRNAs, and is the first database to provide interactions from the high-quality data from mirGeneDB. Moreover, we curated and made available 32,497 novel microRNAs from 14 publications to accelerate the integration of such data.
 
-## How to run the pipeline
+Furthermore, in this release, we extended the content and functionality of mirDIP with the possibility to study tissue-specific and disease-related mechanisms by associating contexts with microRNAs, genes, and microRNA-gene interactions. We collected and processed microRNA and gene expression data from 20 resources and publications and acquired detailed information on 330 tissue and disease contexts in total for 2,657 microRNAs, 27,576 genes, and 123,651,910 gene-microRNA-tissue interactions.
 
-The following command will run the pipeline on `ijcluster`, produce an HTML report and timeline, as well as a `trace.txt` file with similar information about resource usage:
-
-```bash
-nextflow run map_ids.nf -profile ijcluster -with-report -with-timeline -with-trace
-```
-
-The ID mapping process relies on downloaded files `hgnc_complete_set.txt` as well as downloads from Ensembl to function correctly. Scripts in the `scripts/` directory will all depend on the libraries represented in the `mirbaseconverter.yml` conda environment file. Once that environment has been created and activated, you may inspect the options of each script and run each script independently simply by running it on the command line with the `-h` or `--help` options.
-
-# running Noisy-OR integration script
-
-The following command run on the results that are placed in the `params.publishDir` directory after successful execution of the above pipeline, will produce the integrated score. The `-d` option below is the path to `params.publishDir`, and the `-o` option is the path of the integrated score file.
-
-```bash
-# you may construct this environment from the mirbaseconverter.yml file in this repository
-conda activate mirbaseconverter;
-Rscript scripts/mirdip5_run_noisyOR.R \
-        -c `pwd` \
-        -d ./benchmarks_platinum_large_nodups/ \
-        -o mirdip5_noisyor_final.txt
-```
+Finally, we improved the usability of mirDIP version 5.2 by enabling the user to search the database using precursor IDs, and we integrated miRAnno, a network-based tool for identifying pathways linked to specific microRNAs. In addition, we now provide a mirDIP API to provide access to its integrated predictions and support the integration into automated processing pipelines and high throughput analysis. Updated mirDIP continues to be available at https://ophid.utoronto.ca/mirDIP.
