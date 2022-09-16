@@ -1,0 +1,192 @@
+---
+title: "Processing GEW expression data"
+author: "Gitta Ekaputeri, Anne-Christin Hauschild"
+date: "29/08/2022" 
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(miRBaseConverter)
+library(reshape2)
+root_path <- "./"
+result_path <- paste(root_path, "/data/miRNA_final", sep="")
+knitr::opts_knit$set(root.dir = paste(sep="", root_path, "data/miRNA/geWData/"))
+setwd(paste(sep="", root_path, "data/miRNA/geWData/"))
+
+      
+```
+
+### Read counts data
+
+Load and transpose counts file (Sample IDs as header and miRNA IDs as first column)
+```{r}
+oriCountsFile <- read.csv(file = './mature_counts.csv')
+countsFile <- as.data.frame(t(oriCountsFile)) # transpose oriCountsFile
+countsFile <- janitor::row_to_names(countsFile, row_number=1)
+countsFile <- tibble::rownames_to_column(countsFile, var="miR")
+countsFile$miR <- chartr('.', '-', countsFile$miR) # replace '.' with '-' in miR
+countsFile
+```
+
+### Update the IDs 
+
+```{r}
+update <- miRNAVersionConvert(countsFile$miR)
+head(update)
+```
+
+Fetch the mirbase22 IDs and sequences
+
+```{r}
+mrbse <- read.table("../mirbase/mature_homo-sapiens_dataframe.txt", header = T, sep = "\t")
+mrbse <- mrbse[-c(1,2),] # Remove the first two rows that don't match up with mirbase and are the only duplicates, and are the only sequences with T's for some reason.
+head(mrbse)
+```
+
+Create microRNA Mapping table and Update Countfile miRNA Row Names
+```{r}
+mrbse2 <- merge(mrbse, update, by.x = 1, by.y = 2, all.x = F, all.y = T)
+mrbse2 <- mrbse2[,-4]
+dim(mrbse2)
+head(mrbse2)
+rownames(mrbse2)<- mrbse2[,"OriginalName"]
+rownames(countsFile)<-countsFile[,1]
+rownames(countsFile)<- mrbse2[rownames(countsFile), "Name"]
+```
+
+
+Create Row for each miRNA and Merge this with the data
+
+```{r}
+mergedData <- matrix(0, nrow = dim(mrbse)[1], ncol= 302)
+mergedData <- data.frame(mergedData)
+mergedData<- cbind(mrbse, mergedData)
+colnames(mergedData)<- c("Name", "Seq", colnames(countsFile)[-1])
+rownames(mergedData)<-mergedData[,1]
+mergedData[rownames(countsFile), colnames(countsFile)[-1]]<- countsFile[,-1]
+#mergedData <- merge(mrbse2, countsFile, by.x = 3, by.y = 1, all.x = T, all.y = F)
+dim(mergedData)
+head(mergedData)
+#mergedData <- mergedData[,-1] # Remove the original (old) IDs
+mergedData[1:5,1:5]
+mergedData
+```
+
+
+### Quintize the data
+
+For each column: assign each miRNA a value 1-5 depending on which of the 20th percentiles it falls into. If the value is 0, it remains a 0
+
+```{r}
+# Given a column, assign a number to each element from 0-5. All
+# 0s get a 0, and the rest get a value according to the 20th percentile
+# that it falls in among the non-zero values.
+quintize <- function(vec) {
+  qntls <- c(0, quantile(vec[which(vec != 0)], 0.2*(1:4)))
+  vec2 <- sapply(vec, function(x) {
+    if (x == 0) return(0)
+    else return(max(which(x > qntls)))
+  })
+  return(vec2)
+}
+```
+
+```{r}
+mergedData[,3:ncol(mergedData)] = lapply(mergedData[,3:ncol(mergedData)], FUN = function(y){as.numeric(y)})
+quintizedData <- apply(mergedData[,-c(1:2)], 2, quintize)
+quintizedData <- cbind(mergedData[,1:2], quintizedData)
+quintizedData[1:5,1:5]
+```
+
+### Combine the replicates
+
+Get the meta information
+
+```{r}
+meta <- read.table("./meta.txt", header = T, sep = "\t")
+meta$Sample_ID <- gsub("BioSample: https://www.ncbi.nlm.nih.gov/biosample/", "", meta$X.Sample_relation) # extract only SAMN IDs from X.Sample_relation
+meta
+```
+
+
+Create Disease, Tissue, and Group (Tissue_Disease) columns
+
+```{r}
+meta$Tissue <- "testis"
+meta$Disease <- str_replace_all(meta$X.Sample_source_name_ch1, " ", ".")
+meta$Group <- apply(meta[,c(ncol(meta)-1,ncol(meta))], 1, function(x) paste(x[1], x[2], sep="_"))
+meta$Group <- str_replace_all(meta$Group, "_normal.control.testis", "") # normal means no disease
+meta$Disease <- str_replace_all(meta$Disease, "normal.control.testis", "") # no disease
+head(meta)
+```
+
+
+Grouping: Combine replicates (samples that have the same type)
+
+```{r}
+uniqueTissues <- unique(meta$Group)
+combinedData <- lapply(uniqueTissues, function(x) {
+  df <- as.data.frame(quintizedData[,meta$Sample_ID[which(meta$Group == x)]])
+  return(rowMeans(df))
+})
+names(combinedData) <- uniqueTissues
+combinedData <- do.call(cbind, combinedData)
+combinedData <- cbind(quintizedData[,1:2], combinedData)
+```
+
+
+### Ensure the terms are standardized
+Ensure that all the group names appear in the ontology or the corrections file.
+
+Get the ontology and correction files
+
+```{r}
+ont <- read.table("../ontology.txt", header = F, sep = "\t")
+corr <- read.table("../corrections.txt", header = T, sep = "\t")
+head(ont)
+```
+
+Aim to have 0 as a result, meaning all terms are either already in the ontology or the correction file. Or else: update correction file or ontology file, or both.
+
+```{r}
+trms <- unique(unlist(strsplit(names(combinedData)[3:ncol(combinedData)], "_"))) # Splits the composite terms that contain both tissue+disease
+if (length(which(trms %in% union(corr[,1], unique(unlist(ont[,c(1,3)]))))) != 0){
+  trms[-which(trms %in% union(corr[,1], unique(unlist(ont[,c(1,3)]))))] # Which terms aren't in the ontology or the corrected terms
+} else {
+  trms
+}
+```
+
+### Convert to long format
+Add the Canonical column and Source column
+
+```{r}
+data <- combinedData # all tissues have to exist in ontology or correction files
+data$Canonical <- T
+data$Source <- "GeW*"
+data <- data[,c(1,2,ncol(data)-1,ncol(data),3:(ncol(data)-2))] # Set columns alignment
+```
+
+
+Convert to long format
+
+```{r}
+data_long <- melt(data, id.vars=c("Name", "Seq", "Canonical", "Source"))
+```
+
+Binarization
+```{r}
+data_long$Binary <- sapply(data_long$value, function(x) if (x == 0) return(0) else return(1))
+names(data_long) <- c("miR", "Seq", "Canonical", "Source", "Tissue", "Scale", "Binary")
+head(data_long)
+```
+
+### Write to file
+
+```{r}
+write.table(data_long, paste(sep="", result_path,"/geW_longData.txt"), sep = "\t", row.names = F, col.names = T, quote = F)
+write.table(unique(data_long[,1:3]), paste(sep="", result_path,"/geW_miRNAs.txt"), sep = "\t", row.names = F, col.names = T, quote = F)
+writeLines(as.character(unique(data_long$Tissue)), paste(sep="", result_path,"/geW_tissues.txt"))
+```

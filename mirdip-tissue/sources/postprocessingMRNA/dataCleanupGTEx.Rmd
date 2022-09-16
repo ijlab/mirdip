@@ -1,0 +1,146 @@
+---
+title: "cleanupSampleAnnotations"
+author: "Zuhaib Ahmed"
+date: "10/06/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(reshape2)
+setwd("data/RNA/gtexData/")
+```
+
+Load annotations
+```{r}
+anotable <- read.table("sampleAnnotations.txt", header = T, sep = "\t", quote = "")
+```
+According to the data dictionary on the GTEx website, we need the `SAMPID` and `SMTSD` columns. These are the sample names and tissue of sample origin.
+```{r}
+anotable <- anotable[,c("SAMPID", "SMTSD")]
+head(anotable)
+```
+The convention in this project is to take all tissues/diseases, change any string of non-alphanumeric chcaracters into `.` and make all letters lowercase. 
+Change all `-` into `.` in the sample names because once I read in the data files, the header will contain `.`s instead of `-`s. 
+
+```{r}
+anotable$SMTSD <- tolower(str_replace_all(anotable$SMTSD, "[^A-Za-z0-9]+", "\\."))
+anotable$SAMPID <- str_replace_all(anotable$SAMPID, "-", "\\.")
+names(anotable) <- c("Sample", "Group")
+head(anotable)
+```
+Split up the data file row-wise to handle each chunk separately, write each chunk to a separate file and then merge them all together
+
+Read the first chunk which contains the header.
+
+```{r}
+chunk1 <- read.table("rawChunk_aa", header = T, sep ="\t")
+```
+
+```{r}
+hdr <- colnames(chunk1)
+head(hdr)
+```
+
+```{r}
+uniqTissues <- unique(anotable$Group)
+```
+```{r}
+processChunk <- function(chnk) {
+  colnames(chnk) <- hdr
+  chnk_b <- apply(chnk[,-c(1:2)], 2, function(s) {
+    s <- sapply(s, function(z) if (z < 0.1) return(0) else return(1))
+    return(s)
+  })
+  data <- lapply(uniqTissues, function(x) {
+    vec <- anotable$Sample[which(anotable$Group == x)] # These two lines can be factored out since they're the same for every chunk.
+    vec <- vec[which(vec %in% colnames(chnk_b))]
+    df <- chnk_b[,vec]
+    return(sapply(rowSums(as.data.frame(df)), function(y) {
+      if (y < (0.2*ncol(df))) return (0)
+      else return(1)
+    }))
+  })
+  names(data) <- uniqTissues
+  data <- do.call(cbind, data)
+  data <- cbind(chnk[,1:2], data)
+  return(data)
+}
+```
+```{r}
+chunk1_p <- processChunk(chunk1)
+```
+
+Read in the rest of the chunks
+```{r}
+chnkFiles <- list.files()
+chnkFiles <- chnkFiles[grep("rawChunk_", chnkFiles)]
+chnkFiles <- chnkFiles[-which(chnkFiles == "rawChunk_aa")] # 
+chnkFiles
+```
+
+Now load and process the other chunks
+```{r}
+dataList <- lapply(chnkFiles, function(f) {
+  print(f)
+  chnk <- read.table(f, header = F, sep ="\t")
+  chnk_p <- processChunk(chnk)
+  return(chnk_p)
+})
+```
+
+Consolidate all the data
+```{r}
+data_wide <- do.call(rbind, dataList)
+data_wide <- rbind(chunk1_p, data_wide)
+dim(data_wide)
+```
+```{r}
+hist(rowSums(data_wide[,-c(1:2)]), breaks = ncol(data_wide)-1)
+summary(rowSums(data_wide[,-c(1:2)]), breaks = ncol(data_wide)-1)
+```
+Filter by protein-coding genes.
+Get up-to-date protein coding genes from the hgnc website.
+
+```{r}
+pcg <- read.table("../protein-coding_genes_hgnc.txt", header = T, sep = "\t", quote = "", fill = T)
+length(intersect(pcg$symbol, data_wide$Description))
+data_wide2 <- data_wide[which(data_wide$Description %in% pcg$symbol),]
+dim(data_wide2)
+```
+
+Remove duplicated hgnc symbols.
+
+```{r}
+data_wide2 <- data_wide2[-union(which(duplicated(data_wide2$Description)), which(duplicated(data_wide2$Desc, fromLast = T))),]
+dim(data_wide2)
+```
+Let's check the distribution now
+```{r}
+hist(rowSums(data_wide2[,-c(1:2)]), breaks = ncol(data_wide2)-1)
+summary(rowSums(data_wide2[,-c(1:2)]), breaks = ncol(data_wide2)-1)
+```
+Convert this data into long format for saving
+
+Remove the ensembl column
+```{r}
+data_long <- melt(data_wide2[,-1])
+data_long$Source <- "GTEx"
+data_long <- data_long[,c(1,4,2,3)]
+names(data_long) <- c("Gene", "Source", "Tissue", "Value")
+head(data_long)
+```
+
+```{r}
+ write.table(data_long, "gtex_longData.txt", row.names = F, col.names = T, sep = "\t", quote = F)
+ writeLines(as.character(unique(data_long$Gene)), "gtex_genes.txt")
+ writeLines(as.character(unique(data_long$Tissue)), "gtex_tissues.txt")
+```
+
+
+
+
+
+
+

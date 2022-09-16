@@ -1,0 +1,144 @@
+---
+title: "Processing Bongiovanni gene expression data"
+author: "Gitta Ekaputeri, Anne-Christin Hauschild"
+date: "29/08/2022" 
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(miRBaseConverter)
+library(reshape2)
+setwd("/data/RNA/bongiovanniData/")
+```
+
+### Read counts data
+
+Load counts file
+```{r}
+oriCountsFile <- read.table(file = './rsem.merged.gene_counts.tsv')
+countsFile <- oriCountsFile[,-c(2)] # we don't need the second column (transcript_id)
+countsFile <- janitor::row_to_names(countsFile, row_number=1)
+head(countsFile)
+```
+
+### Combine the replicates
+
+Get the meta information
+
+```{r}
+meta <- read.table("./meta.txt", header = T, sep = "\t")
+meta$Sample_ID <- gsub("BioSample: https://www.ncbi.nlm.nih.gov/biosample/", "", meta$X.Sample_relation) # extract only SAMN IDs from X.Sample_relation
+```
+
+
+Create Disease, Tissue, and Group (Tissue_Disease) columns
+
+```{r}
+meta$Tissue <- tolower(meta$X.Sample_source_name_ch1)
+meta$Disease <- ""
+meta$Group <- meta$Tissue # no disease, so group only contains tissue name
+head(meta)
+```
+
+
+Grouping: Combine replicates (samples that have the same type)
+
+```{r}
+uniqueTissues <- unique(meta$Group)
+# Rename the columns in countsFile with SampleID. (Currently the column names are run_accession)
+mapping <- read.csv("./mapping.csv", header = T, sep = ";") # load the mapping
+
+colnames(countsFile)[match(mapping$run_accession,colnames(countsFile))] <- mapping$sample_accession[match(colnames(countsFile), colnames(countsFile))]
+meta$Sample_ID %in% names(countsFile)
+
+
+countsFile[,2:ncol(countsFile)] = lapply(countsFile[,2:ncol(countsFile)], FUN = function(y){as.numeric(y)})
+combinedData <- lapply(uniqueTissues, function(x) {
+  df <- as.data.frame(countsFile)[,meta$Sample_ID[which(meta$Group == x)]]
+  return(rowMeans(df))
+})
+names(combinedData) <- uniqueTissues
+combinedData <- do.call(cbind, combinedData)
+combinedData <- cbind(countsFile[,1], combinedData)
+combinedData <- data.frame(combinedData)
+names(combinedData)[names(combinedData) == 'V1'] <- 'Gene'
+```
+
+
+### Ensure the terms are standardized
+Ensure that all the group names appear in the ontology or the corrections file.
+
+Get the ontology and correction files
+
+```{r}
+ont <- read.table("C:/Users/gitta/Documents/MirDIP_counts/ontology.txt", header = F, sep = "\t")
+corr <- read.table("C:/Users/gitta/Documents/MirDIP_counts/corrections.txt", header = T, sep = "\t")
+```
+
+Aim to have 0 as a result, meaning all terms are either already in the ontology or the correction file. Or else: update correction file or ontology file, or both.
+
+```{r}
+trms <- unique(unlist(strsplit(names(combinedData)[2:ncol(combinedData)], "_"))) # Splits the composite terms that contain both tissue+disease
+if (length(which(trms %in% union(corr[,1], unique(unlist(ont[,c(1,3)]))))) != 0){
+  trms[-which(trms %in% union(corr[,1], unique(unlist(ont[,c(1,3)]))))] # Which terms aren't in the ontology or the corrected terms
+} else {
+  trms
+}
+```
+
+Correct current terms that need to be corrected.
+```{r}
+colnames(combinedData) <- sapply(colnames(combinedData), function(z) {
+  y <- strsplit(z, "_")[[1]]
+  retVal <- sapply(y, function(x) {
+    if (x %in% corr$currentTerm) {
+      return(corr$correctedTerm[match(x, corr$currentTerm)])
+    } else {
+      return(x)
+    }
+  })
+  return(paste(retVal, collapse = "_"))
+})
+```
+
+
+### Convert to long format
+Add Source column
+
+```{r}
+data <- combinedData # all tissues have to exist in ontology or correction files
+data$Source <- "Bongiovanni*"
+data <- data[,c(1,ncol(data),2:(ncol(data)-1))] # Set columns alignment
+head(data)
+```
+
+
+Convert to long format
+
+```{r}
+data_long <- melt(data, id.vars=c("Gene", "Source"))
+```
+
+Binarization
+```{r}
+#data_long$Binary <- sapply(data_long$value, function(x) if (x == 0) return(0) else return(1))
+#names(data_long) <- c("Gene", "Source", "Tissue", "Scale", "Binary")
+#head(data_long)
+
+# Remove non-binary value, keep only binary value.
+data_long$Binary <- sapply(data_long$value, function(x) if (x == 0) return(0) else return(1))
+data_long_final <- subset(data_long, select = -c(value) )
+names(data_long_final) <- c("Gene", "Source", "Tissue", "Binary")
+head(data_long_final)
+```
+
+### Write to file
+
+```{r}
+write.table(data_long_final, "./bongiovanni_longData.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+write.table(unique(data_long_final[,1]), "./bongiovanni_genes.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+writeLines(as.character(unique(data_long_final$Tissue)), "./bongiovanni_tissues.txt")
+```

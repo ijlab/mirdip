@@ -1,0 +1,236 @@
+---
+title: "Processing Panwar expression data"
+author: "Zuhaib Ahmed, Gitta Ekaputeri, Anne-Christin Hauschild"
+date: "12/06/2021"
+update: "29/08/2022" 
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(data.table)
+library(reshape2)
+library(miRBaseConverter)
+setwd("/data/miRNA/panwarData/")
+```
+
+Load the data
+```{r}
+tissues <- read.table("./miRNA_tissue_expression.txt", header = T, sep = "\t", check.names = F)
+tissues[1:5,1:5]
+```
+
+Combine all the rows with the same mature miRNA ID
+```{r}
+tissues2 <- as.data.table(tissues[,-c(2:3)])
+tissues2 <- tissues2[, lapply(.SD, sum, na.rm=TRUE), by = Mature.miRNA.ID, .SDcols=names(tissues2)[-1]]
+tissues2 <- as.data.frame(tissues2)
+row.names(tissues2) <- tissues2$Mature.miRNA.ID
+tissues2 <- tissues2[,-1]
+names(tissues2) <- str_replace(names(tissues2), "(^.*)-.*", "\\1") # Keep only the SRA accessions for the columns
+tissues2[1:5,1:5]
+```
+
+### Update IDs
+I'm going to use mirbase22 to update the miRNA IDs
+
+```{r}
+mrbse <- read.table("../mirbase/mature_homo-sapiens_dataframe.txt", header = T, sep = "\t")
+mrbse <- mrbse[-c(1,2),] # Remove the first two rows that don't match up with mirbase and are the only duplicates, and are the only sequences with T's for some reason.
+head(mrbse)
+```
+
+```{r}
+newMirs <- miRNAVersionConvert(row.names(tissues2), targetVersion = "v22")
+newMirs[690:700,]
+```
+
+Removal of NAs
+
+```{r}
+a<-which(is.na(newMirs$TargetName))
+length(a)
+unique(newMirs[a,"TargetName"])
+unique(newMirs[a,"OriginalName"])
+newMirs2 <- newMirs[-which(is.na(newMirs$TargetName)),]
+dim(newMirs)
+dim(newMirs2)
+nrow(newMirs) - nrow(newMirs2)
+```
+
+Addition of sequences
+
+```{r}
+newMirs3 <- merge(mrbse, newMirs2, by.x = 1, by.y = 2, all.x = F, all.y = T)
+newMirs3 <- newMirs3[,-4]
+head(newMirs3)
+```
+
+Merge these mappings and sequence with the data
+
+```{r}
+tissues3 <- merge(newMirs3, tissues2, by.x = 3, by.y = 0, all.x = T, all.y = F)
+tissues3 <- tissues3[,-1] # Remove the old mir ID names
+tissues3[1:5,1:5]
+```
+
+### Annotate the samples with metadata
+
+Use the file `mirmine_samples_to_keep.txt`. This file is derived from the `miRmine-info.txt` file from mirmine and outlines which samples we want to keep.
+
+```{r}
+meta <- read.table("./mirmine_samples_to_keep.txt", header = T, sep = "\t")
+head(meta)
+```
+
+Create tissue+disease groups from this info
+
+```{r}
+meta$Group <- paste(tolower(str_replace_all(meta$Tissue_cp, "[^A-Za-z0-9]+", "\\.")), 
+                    tolower(str_replace_all(meta$Disease_cp, "[^A-Za-z0-9]+", "\\.")), 
+                    sep = "_")
+meta
+```
+
+The `plasma_non.fatigued` comes from the same study in mirmine as the `plasma.fatigued` samples, which is different than the `plasma_normal` samples. In that study (`High-Throughput Sequencing of Plasma MicroRNA in Chronic Fatigue Syndrome/Myalgic Encephalomyelitis`), it's found that the `plasma.non.fatigued` samples were the normal controls. 
+Replace `plasma_non.fatigued` with `plasma_normal`.
+
+```{r}
+meta$Group[which(meta$Group == "plasma_non.fatigued")] <- "plasma_normal"
+```
+Remove the `_normal` suffix
+
+```{r}
+meta$Group <- str_replace(meta$Group, "_normal", "")
+```
+
+### Quantile every column
+
+For each column, assign each miRNA a value 1-5 depending on which of the 20th percentiles it falls into
+
+```{r}
+# Given a column, assigns a number to each element from 0-5. All
+# 0s get a 0, and the rest get a value according to the 20th percentile
+# that it falls in among the non-zero values.
+quintize <- function(vec) {
+  qntls <- c(0, quantile(vec[which(vec != 0)], 0.2*(1:4)))
+  vec2 <- sapply(vec, function(x) {
+    if (x == 0) return(0)
+    else return(max(which(x > qntls)))
+  })
+  return(vec2)
+}
+```
+
+```{r}
+tissues4 <- apply(tissues3[,-c(1:2)], 2, quintize)
+tissues4[1:5,1:5]
+```
+
+Now to combine the samples belonging to the same group. Combine them by taking the average. This corresponds with the binarization. If any of the samples have a non-zero value for a particular miRNA, then the average will be non-zero, indicating some expression. Conversely, if one particular tissue has a binary value of 1, then it means one of its samples had a non-zero value, which means that they'll have a non-zero average. So non-zero average if and only if the binary value is a 1. 
+
+```{r}
+uniqTissues <- unique(meta$Group)
+tissues5 <- lapply(uniqTissues, function(x) {
+  df <- as.data.frame(tissues4[,meta$Experiment.Accession[which(meta$Group == x)]])
+  return(rowMeans(df))
+})
+names(tissues5) <- uniqTissues
+tissues5 <- do.call(cbind, tissues5)
+tissues5 <- cbind(tissues3[,1:2], tissues5)
+tissues5[1:5,c(1:2,16:20)]
+```
+
+```{r}
+numMat <- t(apply(tissues5[,-c(1:2)], 1, as.numeric))
+hist(rowMeans(numMat), breaks = ncol(numMat)+1, main = "Average miRNA expression across all [averaged] groups")
+hist(apply(numMat, 1, function(x) return(length(which(x != 0)))), breaks = ncol(numMat)+1, main = "Distribution of miRNA expression across all groups")
+summary(rowSums(numMat))
+```
+
+### Ensure the terms are standardized
+
+Ensure that all the group names appear in the ontology or the corrections file.
+
+Get the ontology and correction files
+```{r}
+ont <- read.table("../ontology.txt", header = F, sep = "\t")
+corr <- read.table("../corrections.txt", header = T, sep = "\t")
+head(ont)
+head(corr)
+```
+
+```{r}
+trms <- unique(unlist(strsplit(names(tissues5)[3:ncol(tissues5)], "_"))) # Splits the composite terms that contain both tissue+disease
+trms[-which(trms %in% union(corr[,1], unique(unlist(ont[,c(1,3)]))))] # Which terms aren't in the ontology or the corrected terms
+```
+This means that all terms have been accounted for (i.e. all terms in the datasets are either in the ontology or the corrections file (column 1)). 
+
+Correct the terms that need to be corrected in the long data.
+
+```{r}
+trms <- unique(unlist(strsplit(names(tissues5)[3:ncol(tissues5)], "_")))
+trms[-which(trms %in% unique(unlist(ont[,c(1,3)])))]
+```
+It seems `plasma`, `nasopharyngeal.carcinoma`, and `sperm` are the only term that is in the ontology file. It is in the corrections file though. So it's accounted for. 
+Replace this with the standardized term.
+Remove the `sperm` column from the data due to unclear synonyms like `semen`.
+
+```{r}
+if ("sperm" %in% names(tissues5)) {
+  tissues5 <- tissues5[,-which(names(tissues5) == "sperm")]
+}
+```
+
+Standardize terms
+
+```{r}
+names(tissues5)[3:ncol(tissues5)] <- sapply(names(tissues5)[3:ncol(tissues5)], function(z) {
+  y <- strsplit(z, "_")[[1]]
+  retVal <- sapply(y, function(x) {
+    if (x %in% corr$currentTerm) {
+      return(corr$correctedTerm[match(x, corr$currentTerm)])
+    } else {
+      return(x)
+    }
+  })
+  return(paste(retVal, collapse = "_"))
+})
+```
+
+Finalize the data
+
+
+### Change data to long format
+
+```{r}
+data_long <- melt(tissues5)
+names(data_long) <- c("miR", "Seq", "Tissue", "Value")
+data_long$Canonical <- T # All sequences used here are in mirbase22 (I checked). So all sequences are canonical (i.e. T)
+data_long$Source <- "Panwar"
+data_long <- data_long[,c(1,2,5,6,3,4)]
+data_long$Binary <- sapply(data_long$Value, function(x) if (x == 0) return(0) else return(1))
+head(data_long)
+```
+
+Write data to files
+
+```{r}
+write.table(data_long, "panwar_longData.txt", row.names = F, col.names = T, sep = "\t", quote = F)
+write.table(unique(data_long[,1:3]), "panwar_miRNAs.txt", row.names = F, col.names = T, sep = "\t", quote = F)
+writeLines(as.character(unique(data_long$Tissue)), "panwar_tissues.txt")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

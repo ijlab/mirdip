@@ -1,0 +1,275 @@
+---
+title: "Processing TCGA expression data"
+author: "Gitta Ekaputeri, Anne-Christin Hauschild"
+date: "29/08/2022" 
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(miRBaseConverter)
+library(reshape2)
+
+#### Used Files: 
+fileCounts<-'./microRNA_TCGA_preprocessed.txt'
+fileMetaData<-"./Samples_mapped_microRNAs.txt"
+fileOntology<-"../ontology2.txt"
+fileCorrections<-"../corrections.txt"
+fileRemTissues<-"../removeTissues.txt"
+```
+
+### Read counts data
+
+Load and counts file
+```{r}
+oriCountsFile <- read.table(file = fileCounts)
+countsFile <- oriCountsFile
+countsFile <- janitor::row_to_names(countsFile, row_number=1)
+names(countsFile)[1] <- "miR"
+head(countsFile)
+countsFile$miR <- str_extract(countsFile$miR, "[^|]+") 
+countsFile
+```
+
+### Update the IDs 
+
+```{r}
+update <- miRNAVersionConvert(countsFile$miR)
+head(update)
+length(unique(countsFile$miR))
+length(unique(update[,"OriginalName"]))
+length(unique(update[,"TargetName"]))
+
+```
+
+Fetch the mirbase22 IDs and sequences
+
+```{r}
+mrbse <- read.table("../mature_homo-sapiens_dataframe.txt", header = T, sep = "\t")
+mrbse <- mrbse[-c(1,2),] # Remove the first two rows that don't match up with mirbase and are the only duplicates, and are the only sequences with T's for some reason.
+dim(mrbse)
+head(mrbse)
+```
+
+Merge this with the updated IDs
+
+```{r}
+mrbse2 <- merge(mrbse, update, by.x = 1, by.y = 2, all.x = F, all.y = T)
+mrbse2 <- mrbse2[,-4]
+dim(mrbse2)
+head(mrbse2)
+```
+
+
+Merge this with the data
+
+```{r}
+mergedData <- merge(mrbse2, countsFile, by.x = 3, by.y = 1, all.x = T, all.y = F)
+mergedData <- mergedData[,-1] # Remove the original (old) IDs
+mergedData[1:5,1:5]
+dim(mergedData)
+head(mergedData)
+length(mergedData[,"Name"])
+```
+
+
+### Quintize the data
+
+For each column: assign each miRNA a value 1-5 depending on which of the 20th percentiles it falls into. If the value is 0, it remains a 0
+
+```{r}
+# Given a column, assign a number to each element from 0-5. All
+# 0s get a 0, and the rest get a value according to the 20th percentile
+# that it falls in among the non-zero values.
+quintize <- function(vec) {
+  qntls <- c(0, quantile(vec[which(vec != 0)], 0.2*(1:4)))
+  vec2 <- sapply(vec, function(x) {
+    if (x == 0 || is.na(x)) return(0)
+    else return(max(which(x > qntls)))
+  })
+  return(vec2)
+}
+```
+
+```{r}
+mergedData[,3:ncol(mergedData)] = lapply(mergedData[,3:ncol(mergedData)], FUN = function(y){as.numeric(y)})
+quintizedData <- apply(mergedData[,-c(1:2)], 2, quintize)
+quintizedData <- cbind(mergedData[,1:2], quintizedData)
+quintizedData[1:5,1:5]
+```
+
+
+### Combine the replicates
+
+Get the sample mapping file
+
+```{r}
+mapping <- read.table(fileMetaData)
+mapping <- janitor::row_to_names(mapping, row_number=1)
+head(mapping)
+
+#annotation <- read.table("./microRNA_samples.txt")
+#annotation <- janitor::row_to_names(annotation, row_number=1)
+#names(annotation)[2] <- "Disease"
+#sampleMeta <- read.table("rigoutsos_sampleInfo.txt", header = T, sep = "\t")
+#meta <- read.table("meta.txt", header = T, sep = "\t")
+#meta$patient.primary_pathology.tumor_tissue_site
+
+# Create sample - tissue mapping
+#mapping <- sampleMeta[,names(sampleMeta) %in% c("Sample","tissue_or_organ_of_origin")]
+#names(mapping)[2] <- "Tissue"
+#mapping$Sample <- chartr('-', '.', mapping$Sample) # replace '-' with '.' in Sample
+
+
+# Add tissue info to annotation, based on sample-tissue mapping
+#annotation$Tissue <- mapping$Tissue[match(annotation$Sample, mapping$Sample)]
+
+#Sample <- annotation$Sample
+#missingTissue <- Sample[which(is.na(annotation$Tissue))]
+#missingTissue
+
+```
+
+
+Create Disease, Tissue, and Group (Tissue_Disease) columns
+
+```{r}
+mapping$Tissue <- str_replace_all(mapping$tumor_tissue_site, " ", ".")
+head(mapping)
+mapping$Tissue <- tolower(mapping$Tissue)
+head(mapping)
+mapping$Group <- apply(mapping[,c(5,2)], 1, function(x) paste(x[1], x[2], sep="_"))
+head(mapping)
+```
+
+
+Grouping: Combine replicates (samples that have the same type)
+
+```{r}
+uniqueTissues <- unique(mapping$Group)
+quintizedData2 <- quintizedData
+head(quintizedData2[,1:10])
+dim(quintizedData2)
+dim(mapping)
+mapTrue<- mapping$Sample_ID %in% names(quintizedData2)
+length(mapTrue)
+sum(mapTrue)
+
+#test <- quintizedData2[,(names(quintizedData2) %in% mapping$Sample_ID)]
+#test2 <- lapply(uniqueTissues, function(x) {
+#  df <- as.data.frame(test[,mapping$Sample_ID[which(mapping$Group == x)]])
+#  return(rowMeans(df))
+#})
+
+
+combinedData <- lapply(uniqueTissues, function(x) {
+  df <- as.data.frame(quintizedData2[,mapping$Sample_ID[which(mapping$Group == x)]])
+  return(rowMeans(df))
+})
+
+names(combinedData) <- uniqueTissues
+combinedData <- do.call(cbind, combinedData)
+combinedData <- cbind(quintizedData2[,1:2], combinedData)
+head(combinedData)
+cleantissues<-colnames(combinedData)
+cleantissues<- sapply(cleantissues, FUN=function(g){ 
+                                            a<-gsub( "(", ".", g, fixed = TRUE); 
+                                            a<-gsub( ")", ".", a, fixed = TRUE); 
+                                            a<-gsub( "-", ".", a, fixed = TRUE); 
+                                            a<-gsub( "/", ".", a, fixed = TRUE); 
+                                            a<-gsub( "..", ".", a, fixed = TRUE); 
+                                            a<-gsub("..", ".", a, fixed = TRUE); 
+                                            a<-gsub("._", "_", a, fixed = TRUE); 
+                                            return(a) } )
+#(data_long[43:48,"Tissue"])
+(unique(cleantissues)[43:48])
+colnames(combinedData)<-cleantissues
+head(combinedData)
+
+## Remove Tissues:
+dim(combinedData)
+rmTissues <- unlist(read.table(fileRemTissues, header = F, sep = "\t"))
+n<-"lower.abdominal.pelvic.other.please.specify_sarcoma"
+rmList<- sapply(colnames(combinedData), FUN=function(n){ l<-unlist(strsplit(n, "_"));  
+                                                         l<- c(l %in% rmTissues, l=="NA")
+                                                         return(sum(l)>0)  }) 
+sum(rmList)
+combinedData<- combinedData[,!rmList]
+dim(combinedData)
+
+```
+
+
+### Ensure the terms are standardized
+Ensure that all the group names appear in the ontology or the corrections file.
+
+Get the ontology and correction files
+
+```{r}
+ont <- read.table(fileOntology, header = F, sep = "\t")
+corr <- read.table(fileCorrections, header = T, sep = "\t")
+```
+
+Aim to have 0 as a result, meaning all terms are either already in the ontology or the correction file. Or else: update correction file or ontology file, or both.
+
+```{r}
+  trms <- unique(unlist(strsplit(names(combinedData)[3:ncol(combinedData)], "_"))) # Splits the composite terms that contain both tissue+disease
+  if (length(which(trms %in% union(corr[,1], unique(unlist(ont[,c(1,3)]))))) != 0){
+    trms[-which(trms %in% union(corr[,1], unique(unlist(ont[,c(1,3)]))))] # Which terms aren't in the ontology or the corrected terms
+  } else {
+    trms
+  }
+```
+Correct current terms that need to be corrected.
+```{r}
+colnames(combinedData) <- sapply(colnames(combinedData), function(z) {
+  y <- strsplit(z, "_")[[1]]
+  retVal <- sapply(y, function(x) {
+    if (x %in% corr$currentTerm) {
+      return(corr$correctedTerm[match(x, corr$currentTerm)])
+    } else {
+      return(x)
+    }
+  })
+  return(paste(retVal, collapse = "_"))
+})
+```
+
+### Convert to long format
+Add the Canonical column and Source column
+
+```{r}
+data <- combinedData # all tissues have to exist in ontology or correction files
+data$Canonical <- sapply(data$Seq, function(x) if (x %in% mrbse$Seq) return(T) else return(F))
+data$Source <- "TCGA"
+data <- data[,c(1,2,ncol(data)-1,ncol(data),3:(ncol(data)-2))] # Set columns alignment
+head(data)
+```
+
+
+Convert to long format
+
+```{r}
+data_long <- melt(data, id.vars=c("Name", "Seq", "Canonical", "Source"))
+```
+
+Binarization
+```{r}
+data_long$Binary <- sapply(data_long$value, function(x) if (x == 0) return(0) else return(1))
+names(data_long) <- c("miR", "Seq", "Canonical", "Source", "Tissue", "Scale", "Binary")
+
+
+
+
+```
+
+
+### Write to file
+
+```{r}
+write.table(data_long, "./tcga_longData.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+write.table(unique(data_long[,1:3]), "./tcga_miRNAs.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+writeLines(as.character(unique(data_long$Tissue)), "./tcga_tissues.txt")
+```

@@ -1,0 +1,268 @@
+---
+title: "Processing MC Call expression data"
+author: "Zuhaib Ahmed, Gitta Ekaputeri, Anne-Christin Hauschild"
+date: "16/07/2021"
+update: "29/08/2022" 
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(microRNAome)
+library(stringr)
+library(miRBaseConverter)
+library(reshape2)
+```
+
+### Load the data
+
+```{r}
+setwd("./data/miRNA/mccallData/")
+
+
+
+#data("microRNAome")
+#mirnome <- assay(microRNAome)
+#rm(microRNAome)
+#mirnome[1:5,1:5]
+```
+
+We need to remove any rows that have a `/` in them. They refer to multiple IDs and there's no way to determine which to attribute the counts to. 
+
+```{r}
+mirnome2 <- mirnome[-grep("\\/", row.names(mirnome)),]
+dim(mirnome)
+dim(mirnome2)
+```
+
+We lost 16 rows. Not too bad.
+
+### Fetch metadata
+
+The supplementary files provided have the metadata for some of the samples, but not all of them. There's probably a way of getting the meta data from SRADb, but I don't know how to yet. So for now, I'll just use the supplementary files. In the future, I'll be able to get the meta data for the remaining samples.
+The following chunk of code compiles all the sample data from the supplementary files. We're not including cell lines so I've excluded supplementary file 3.
+
+```{r}
+s5 <- read.table("./supp_gr.222067.117_Supplemental_Table_S5.csv", header = T, sep = "\t")
+s5meta <- names(s5)[grep("[SED]RR", names(s5))]
+s5meta2 <- data.frame(ID = str_replace(s5meta, "(.*)\\.([SED]RR[^\\.]+)\\.*.*$", "\\2"),
+                      Meta = str_replace(s5meta, "(.*)\\.([SED]RR[^\\.]+)\\.*.*$", "\\1"))
+#s5meta2$Meta <- tolower(str_replace_all(s5meta2$Meta, "[^A-Za-z0-9]+", "\\."))
+
+s2 <- read.table("./supp_gr.222067.117_Supplemental_Table_S2.csv", header = T, sep = "\t")
+s2 <- s2[,c(3,1)]
+#s2$Cell.Type <- tolower(str_replace_all(s2$Cell.Type, "[^A-Za-z0-9]+", "\\."))
+colnames(s2) <- c("ID", "Meta")
+s4 <- read.table("./supp_gr.222067.117_Supplemental_Table_S4.csv", header = T, sep = "\t")
+s4 <- s4[,c(2,1)]
+#s4$Tissue <- tolower(str_replace_all(s4$Tissue, "[^A-Za-z0-9]+", "\\."))
+colnames(s4) <- c("ID", "Meta")
+
+meta <- do.call(rbind, list(s5meta2, 
+                            s2[-which(s2$SRA.Number %in% s5meta2$SRANumber),],
+                            s4[-which(s4$SRAnumber %in% s5meta2$SRANumber),]))
+meta <- meta[order(meta$Meta),]
+colnames(meta) <- c("ID", "Group")
+head(meta)
+```
+
+### Update miRNA IDs to mirbase22
+
+I need to ensure that the miRNAs are up to date as well as to get the canonical sequence from mirbase. 
+
+```{r}
+newIDs <- miRNAVersionConvert(row.names(mirnome2))
+head(newIDs)
+```
+
+```{r}
+newIDs[which(is.na(newIDs[,2])),]
+```
+There are 29 NA values. I'll remove them.
+```{r}
+newIDs2 <- newIDs[-which(is.na(newIDs[,2])),-3]
+```
+
+There are some duplicated mappings too
+
+```{r}
+newIDs2[union(which(duplicated(newIDs2[,2])), which(duplicated(newIDs2[,2], fromLast = T))),]
+```
+I'll remove these rows as well
+
+```{r}
+newIDs3 <- newIDs2[-union(which(duplicated(newIDs2[,2])), which(duplicated(newIDs2[,2], fromLast = T))),]
+```
+
+Replace the old miR IDs with the new ones.
+
+```{r}
+mirnome3 <- merge(newIDs3, mirnome2, by.x = 1, by.y = 0, all.x = T, all.y = F)
+mirnome3 <- mirnome3[,-1]
+mirnome3[1:5,1:5]
+```
+
+Get the sequences from mirbase22
+
+```{r}
+mrbse <- read.table("../mirbase/mature_homo-sapiens_dataframe.txt", header = T, sep = "\t")
+mrbse <- mrbse[-c(1,2),] # Remove the first two rows that don't match up with mirbase and are the only duplicates, and are the only sequences with T's for some reason.
+head(mrbse)
+```
+
+Merge this with the count data
+
+```{r}
+mirnome4 <- merge(mrbse, mirnome3, by.x = 1, by.y = 1, all.x = F, all.y = T)
+mirnome4[1:5,1:5]
+```
+
+### Quantile every column
+
+For each column, I'll assign each miRNA a value 1-5 depending on which of the 20th percentiles it falls into
+
+```{r}
+# Given a column, assigns a number to each element from 0-5. All
+# 0s get a 0, and the rest get a value according to the 20th percentile
+# that it falls in among the non-zero values.
+quintize <- function(vec) {
+  qntls <- c(0, quantile(vec[which(vec != 0)], 0.2*(1:4)))
+  vec2 <- sapply(vec, function(x) {
+    if (x == 0) return(0)
+    else return(max(which(x > qntls)))
+  })
+  return(vec2)
+}
+```
+
+```{r}
+mirnome5 <- apply(mirnome4[,-c(1:2)], 2, quintize)
+mirnome5 <- mirnome5[,which(colnames(mirnome5) %in% meta$ID)]
+
+mirnome5 <- cbind(mirnome4[,1:2], mirnome5)
+mirnome5[1:5,1:5]
+```
+
+Now to combine the datasets that belong to the same group
+
+Firstly, the cnvention of this project is to lowercase all letters and replance any string of non-alphanumeric characters with a `.`.
+
+```{r}
+meta2 <- meta
+meta2$Group <- tolower(str_replace_all(meta2$Group, "[^A-Za-z0-9]+", "\\."))
+```
+
+```{r}
+uniqTissues <- unique(meta2$Group)
+mirnome6 <- lapply(uniqTissues, function(x) {
+  df <- as.data.frame(mirnome5[,meta2$ID[which(meta2$Group == x)]])
+  return(rowMeans(df))
+})
+names(mirnome6) <- uniqTissues
+mirnome6 <- do.call(cbind, mirnome6)
+mirnome6 <- cbind(mirnome5[,1:2], mirnome6)
+mirnome6[1:5,c(1:2,16:20)]
+```
+
+### Standardize the column names
+
+The column names need to be in accordance with the ontology terms. Load the ontology and corrections files to ensure that all names are standardized
+
+```{r}
+ont <- read.table("../ontology.txt", header = F, sep = "\t")
+corr <- read.table("../corrections.txt", header = T, sep = "\t")
+head(ont)
+head(corr)
+```
+
+```{r}
+trms <- unique(unlist(strsplit(names(mirnome6)[-c(1,2)], "_"))) # Splits the composite terms that contain both tissue+disease
+trms <- trms[-which(trms %in% union(corr[,1], unique(unlist(ont[,c(1,3)]))))] # Which terms aren't in the ontology or the corrected terms
+trms
+```
+
+Remove synonyms.
+```{r}
+trms2 <- unique(unlist(strsplit(colnames(mirnome6)[-c(1:2)], "_")))
+trms2 <- trms2[-which(trms2 %in% unique(unlist(ont[,c(1,3)])))]
+setdiff(trms2, trms)
+```
+
+
+
+Correct tissue files.
+
+```{r}
+names(mirnome6)[3:ncol(mirnome6)] <- sapply(names(mirnome6)[3:ncol(mirnome6)], function(z) {
+  y <- strsplit(z, "_")[[1]]
+  retVal <- sapply(y, function(x) {
+    if (x %in% corr$currentTerm) {
+      return(corr$correctedTerm[match(x, corr$currentTerm)])
+    } else {
+      return(x)
+    }
+  })
+  return(paste(retVal, collapse = "_"))
+})
+```
+
+Now remove those columns that didn't show up in the ontology
+
+```{r}
+mirnome7 <- mirnome6[,-which(colnames(mirnome6) %in% trms)]
+ncol(mirnome6) - ncol(mirnome7)
+```
+So 61 of the column groups couldn't be added. Perhaps they can be added later on.
+
+### Convert data to long format
+
+First add in a `Canonical` and `Source` column. All sequences here are canonical. So we can simply fill the column with `TRUE`.
+
+```{r}
+mirnome8 <- mirnome7
+mirnome8$Canonical <- T
+mirnome8$Source <- "McCall"
+mirnome8 <- mirnome8[,c(1,2,ncol(mirnome8)-1,ncol(mirnome8),3:(ncol(mirnome8)-2))]
+head(mirnome8)
+```
+
+```{r}
+data_long <- melt(mirnome8)
+data_long$Binary <- sapply(data_long$value, function(x) if (x == 0) return(0) else return(1))
+names(data_long) <- c("miR", "Seq", "Canonical", "Source", "Tissue", "Value", "Binary")
+head(data_long)
+```
+
+### Write to File
+
+```{r}
+write.table(data_long, "mccall_longData.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+write.table(unique(data_long[,1:3]), "mccall_miRNAs.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+writeLines(as.character(unique(data_long$Tissue)), "mccall_tissues.txt")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

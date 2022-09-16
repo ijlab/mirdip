@@ -1,0 +1,210 @@
+---
+title: "Processing Naccarati expression data"
+author: "Zuhaib Ahmed, Gitta Ekaputeri, Anne-Christin Hauschild"
+date: "09/08/2021"
+update: "29/08/2022" 
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(miRBaseConverter)
+library(reshape2)
+setwd("/data/miRNA/naccaratiData/")
+
+```
+
+### Read in data and metadata
+
+```{r}
+data <- read.table("./GSE128359_ANACC1-NORM_Normal_samples_sncRNA_Analysis-2018-06-12_exceRpt_miRNA_ReadsPerMillion.txt", header = T, sep = "\t")
+names(data) <- str_replace_all(names(data), "sample_|_fq", "") # Get rid of uncessary pre/suffixes in names
+data[1:5,1:10]
+```
+
+```{r}
+meta <- read.table("./meta.txt", header = T, sep = "\t")
+head(meta)
+```
+
+### Update mirIDs
+
+```{r}
+newMirs <- miRNAVersionConvert(data$X, targetVersion = "v22")
+newMirs[c(1:5, head(which(newMirs[,1] != newMirs[,2])), head(which(is.na(newMirs$TargetName)),7)),]
+dim(newMirs)
+```
+Most of the mirIDs match up with mirbase22 and remove NA rows.
+
+```{r}
+a<-union(which(newMirs[,1] != newMirs[,2]),which(is.na(newMirs$TargetName)))
+length(a)
+unique(newMirs[a,"TargetName"])
+unique(newMirs[a,"OriginalName"])
+newMirs2 <- newMirs[-union(which(newMirs[,1] != newMirs[,2]),which(is.na(newMirs$TargetName))),]
+dim(newMirs2)
+nrow(newMirs) - nrow(newMirs2)
+head(newMirs2)
+
+
+
+```
+Fetch the mirbase22 IDs and merge with sequences.
+
+```{r}
+mrbse <- read.table("../mirbase/mature_homo-sapiens_dataframe.txt", header = T, sep = "\t")
+mrbse <- mrbse[-c(1,2),] # Remove the first two rows that don't match up with mirbase and are the only duplicates, and are the only sequences with T's for some reason.
+dim(mrbse)
+head(mrbse)
+```
+
+```{r}
+mrbse2 <- merge(mrbse, newMirs2, by.x = 1, by.y = 2, all.x = F, all.y = T)
+sum(!newMirs2[,"TargetName"] %in% mrbse2[, "Name"])
+dif<-newMirs2[!newMirs2[,"TargetName"] %in% mrbse2[, "Name"],]
+head(dif)
+dim(mrbse2)
+mrbse2[c(110:115, tail(which(is.na(mrbse2$Seq)))),]
+```
+Remove precursor IDs that can't be mapped to either of the mature arms.
+
+```{r}
+mrbse3 <- mrbse2[-which(is.na(mrbse2$Seq)),-4]
+dim(mrbse3)
+nrow(mrbse2) - nrow(mrbse3)
+```
+Merge with the count data
+
+```{r}
+data2 <- merge(mrbse3, data, by.x = 3, by.y = 1, all.x = T, all.y = F)
+data2 <- data2[,-1]
+data2[1:5,1:5]
+dim(data2)
+```
+
+### Quintize the data
+
+For each column, assign each miRNA a value 1-5 depending on which of the 20th percentiles it falls into. If the value is 0, it remains a 0
+
+```{r}
+# Given a column, assigns a number to each element from 0-5. All
+# 0s get a 0, and the rest get a value according to the 20th percentile
+# that it falls in among the non-zero values.
+quintize <- function(vec) {
+  qntls <- c(0, quantile(vec[which(vec != 0)], 0.2*(1:4)))
+  vec2 <- sapply(vec, function(x) {
+    if (x == 0) return(0)
+    else return(max(which(x > qntls)))
+  })
+  return(vec2)
+}
+```
+
+```{r}
+data3 <- apply(data2[,-c(1:2)], 2, quintize)
+data3 <- cbind(data2[,1:2], data3)
+data3[1:5,1:5]
+```
+
+### Combine the replicates
+
+```{r}
+uniqTissues <- unique(str_replace(names(data3), "_[0-9]+", "")[-c(1:2)])
+data4 <- lapply(uniqTissues, function(x) {
+  df <- as.data.frame(data3[,grep(x, names(data3))])
+  return(rowMeans(df))
+})
+names(data4) <- uniqTissues
+data4 <- do.call(cbind, data4)
+colnames(data4) <- tolower(colnames(data4))
+data4 <- cbind(data3[,1:2], data4)
+data4[100:105,1:5]
+```
+
+### Ensure the terms are standardized
+
+I need to ensure that all the group names appear in the ontology or the corrections file.
+
+Get the ontology and correction files
+```{r}
+ont <- read.table("../ontology.txt", header = F, sep = "\t")
+corr <- read.table("../corrections.txt", header = T, sep = "\t")
+head(ont)
+head(corr)
+```
+
+```{r}
+trms <- unique(unlist(strsplit(names(data4)[3:ncol(data4)], "_"))) # Splits the composite terms that contain both tissue+disease
+trms[-which(trms %in% union(corr[,1], unique(unlist(ont[,c(1,3)]))))] # Which terms aren't in the ontology or the corrected terms
+```
+This means that all terms have been accounted for (i.e. all terms in the datasets are either in the ontology or the corrections file (column 1)). Correct the terms that need to be corrected in the data.
+
+```{r}
+trms <- unique(unlist(strsplit(names(data4)[3:ncol(data4)], "_")))
+trms[-which(trms %in% unique(unlist(ont[,c(1,3)])))]
+```
+These terms are in the corrections file but not the ontology file. Correct these now
+
+```{r}
+data5 <- data4
+names(data5)[3:ncol(data5)] <- sapply(names(data5)[3:ncol(data5)], function(z) {
+  y <- strsplit(z, "_")[[1]]
+  retVal <- sapply(y, function(x) {
+    if (x %in% corr$currentTerm) {
+      return(corr$correctedTerm[match(x, corr$currentTerm)])
+    } else {
+      return(x)
+    }
+  })
+  return(paste(retVal, collapse = "_"))
+})
+head(data5)
+```
+
+Terms have been corrected. Convert the data to long format
+
+### Make long format
+
+Add in a `Source` and `Canonical` column, These miRs are all canonical.
+
+```{r}
+data6 <- data5
+data6$Canonical <- T
+data6$Source <- "Naccarati"
+data6 <- data6[,c(1,2,ncol(data6)-1,ncol(data6),3:(ncol(data6)-2))]
+head(data6)
+```
+
+```{r}
+data_long <- melt(data6)
+data_long$Binary <- sapply(data_long$value, function(x) if (x == 0) return(0) else return(1))
+names(data_long) <- c("miR", "Seq", "Canonical", "Source", "Tissue", "Value", "Binary")
+head(data_long)
+```
+
+### Write to file
+
+```{r}
+write.table(data_long, "naccarati_longData.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+write.table(unique(data_long[,1:3]), "naccarati_miRNAs.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+writeLines(as.character(unique(data_long$Tissue)), "naccarati_tissues.txt")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

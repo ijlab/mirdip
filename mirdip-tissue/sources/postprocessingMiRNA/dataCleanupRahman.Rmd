@@ -1,0 +1,199 @@
+---
+title: "Processing Rahman expression data"
+author: "Zuhaib Ahmed, Gitta Ekaputeri, Anne-Christin Hauschild"
+date: "09/08/2021"
+update: "29/08/2022" 
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(reshape2)
+library(miRBaseConverter)
+setwd("/data/miRNA/rahmanData/")
+```
+
+### Read in data and meta data
+
+```{r}
+fls <- list.files()
+fls <- fls[grep("GSM", fls)]
+data <- lapply(fls, function(x) {
+  z <- read.table(x, header = F, sep = "\t")
+  z <- z[grep("hsa-miR", z[,1]),]
+  names(z) <- c("miR", str_split(x, "_")[[1]][1])
+  return(z)
+})
+names(data) <- sapply(str_split(fls, "_"), "[", 1)
+
+data <- Reduce(function(x,y) merge(x, y, by = 1, all = T), data)
+head(data)
+```
+
+### Update miR IDs
+
+This study is from 2020, so good chance that all the miR IDs are already updated to mirbase22. But I'll check just to be sure. 
+
+```{r}
+newMirs <- miRNAVersionConvert(data$miR, targetVersion = "v22")
+newMirs[c(1:3,head(which(newMirs[,1] != newMirs[,2])),head(which(is.na(newMirs[,2])))),]
+```
+So there are some miR IDs that differ and some that aren't in mirbase22 (e.g. `hsa-miR-1273f` was obsolete)
+I'll remove rows in which the miR ID doesn't map (i.e. the `NA` miRs)
+
+```{r}
+a<-which(is.na(newMirs$TargetName))
+length(a)
+unique(newMirs[a,"TargetName"])
+unique(newMirs[a,"OriginalName"])
+newMirs2 <- newMirs[-which(is.na(newMirs$TargetName)),]
+nrow(newMirs) - nrow(newMirs2)
+```
+
+This removed 380 miRs
+
+Fetch the mirbase22 sequences to merge with
+
+```{r}
+mrbse <- read.table("../mirbase/mature_homo-sapiens_dataframe.txt", header = T, sep = "\t")
+mrbse <- mrbse[-c(1,2),] # Remove the first two rows that don't match up with mirbase and are the only duplicates, and are the only sequences with T's for some reason.
+head(mrbse)
+```
+
+```{r}
+mrbse2 <- merge(mrbse, newMirs2[,-3], by.x = 1, by.y = 2, all.x = F, all.y = T)
+head(mrbse2)
+```
+
+Now merge this with the count data
+
+```{r}
+data2 <- merge(mrbse2, data, by.x = 3, by.y = 1, all.x = T, all.y = F)
+data2 <- data2[,-1] # Remove the original (old) mirIDs. Don't need them.
+data2[1:5,1:5]
+```
+
+### Quintize the data
+
+For each column, I'll assign each miRNA a value 1-5 depending on which of the 20th percentiles it falls into. If the value is 0, it remains a 0
+
+```{r}
+# Given a column, assigns a number to each element from 0-5. All
+# 0s get a 0, and the rest get a value according to the 20th percentile
+# that it falls in among the non-zero values.
+quintize <- function(vec) {
+  qntls <- c(0, quantile(vec[which(vec != 0)], 0.2*(1:4)))
+  vec2 <- sapply(vec, function(x) {
+    if (x == 0) return(0)
+    else return(max(which(x > qntls)))
+  })
+  return(vec2)
+}
+```
+
+```{r}
+data3 <- apply(data2[,-c(1:2)], 2, quintize)
+data3 <- cbind(data2[,1:2], data3)
+data3[1:5,1:5]
+```
+
+### Consolidate the replicates
+
+First I'll get the metadata
+
+```{r}
+meta <- read.table("./meta.txt", header = T, sep = "\t")
+head(meta)
+```
+
+There are only two conditions here: `peripheral.blood` and `peripheral.blood_parkinsons.disease`
+
+```{r}
+meta2 <- meta
+meta2$Group <- apply(meta2, 1, function(x) {
+  tiss <- tolower(str_replace(x[3], "[^A-Za-z0-9]+", "\\."))
+  if (grepl("Control", x[7])) dis <- ""
+  else dis <- "_parkinsons.disease"
+  return(paste0(tiss, dis))
+})
+```
+
+Now to combine the samples that belong to the same group
+
+```{r}
+uniqTissues <- unique(meta2$Group)
+data4 <- lapply(uniqTissues, function(x) {
+  df <- as.data.frame(data3[,meta2$X.Sample_geo_accession[which(meta2$Group == x)]])
+  return(rowMeans(df))
+})
+names(data4) <- uniqTissues
+data4 <- do.call(cbind, data4)
+data4 <- cbind(data3[,1:2], data4)
+head(data4[order(abs(data4[,3] - data4[,4]), decreasing = T),])
+```
+
+I ordered the miRs so that those with the largest difference in mean between the groups shows up at the top. But that's besides the point. Now I need to ensure that the terms here are in the ontology and corrections files
+
+### Ensure the terms are standardized
+
+I need to ensure that all the group names appear in the ontology or the corrections file.
+
+Get the ontology and correction files
+```{r}
+ont <- read.table("../ontology.txt", header = F, sep = "\t")
+corr <- read.table("../corrections.txt", header = T, sep = "\t")
+head(ont)
+head(corr)
+```
+
+```{r}
+trms <- unique(unlist(strsplit(names(data4)[3:ncol(data4)], "_"))) # Splits the composite terms that contain both tissue+disease
+trms[-which(trms %in% union(corr[,1], unique(unlist(ont[,c(1,3)]))))] # Which terms aren't in the ontology or the corrected terms
+```
+This means that all terms have been accounted for (i.e. all terms in the datasets are either in the ontology or the corrections file (column 1)). So I'll just correct the terms that need to be corrected in the data.
+
+```{r}
+trms <- unique(unlist(strsplit(names(data4)[3:ncol(data4)], "_")))
+trms[-which(trms %in% unique(unlist(ont[,c(1,3)])))]
+```
+All the terms used in this dataset are in the `ontology.txt` file and not the `corrections.txt` file. There are no corrections necessary. I can proceed to the next step.
+
+### Make Long Format
+
+Add in a `Source` and `Canonical` column, These miRs are all canonical.
+
+```{r}
+data5 <- data4
+data5$Canonical <- T
+data5$Source <- "Rahman"
+data5 <- data5[,c(1,2,ncol(data5)-1,ncol(data5),3:(ncol(data5)-2))]
+dim(data5)
+head(data5)
+```
+
+```{r}
+data_long <- melt(data5)
+data_long$Binary <- sapply(data_long$value, function(x) if (x == 0) return(0) else return(1))
+names(data_long) <- c("miR", "Seq", "Canonical", "Source", "Tissue", "Value", "Binary")
+head(data_long)
+```
+
+### Write to file
+
+```{r}
+# write.table(data_long, "rahman_longData.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+# write.table(unique(data_long[,1:3]), "rahman_miRNAs.txt", sep = "\t", row.names = F, col.names = T, quote = F)
+# writeLines(as.character(unique(data_long$Tissue)), "rahman_tissues.txt")
+```
+
+
+
+
+
+
+
+
+
+
+

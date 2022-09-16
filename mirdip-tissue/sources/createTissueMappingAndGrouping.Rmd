@@ -1,0 +1,165 @@
+---
+title: "Creating Tissue Mapping and Tissue Groupings"
+author: "Zuhaib Ahmed / Anne-Christin Hauschild"
+date: "16/06/2021"
+update: "29/08/2022" 
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#Linux
+source_path <<- "./"
+root_path <<- "../"
+
+
+## Define Standard folders
+data_path <- paste(root_path, "data/", sep="")
+results_path <- paste(root_path, "results/", sep="")
+## Define files:
+ontologyfile<-paste(data_path, "ontology.txt", sep="")
+allTissuesMirsFile<-paste(results_path, "allTissues_mirs.txt", sep="")
+allTissuesGenesFile <- paste(results_path, "allTissues_genes.txt", sep="")
+allTissuesNovelmirsFile <- paste(results_path, "allTissues_novelMirs.txt", sep="")
+uncoveredTermsFile<-paste(results_path, "allUncoveredTerms.txt", sep="")
+
+allTissueMappingsFile <- paste(results_path, "allTissueMappings_220904.txt", sep="")
+allTissueGroupingsFile<- paste(results_path, "allTissueGroupings_220904.txt", sep="")
+
+knitr::opts_chunk$set(echo = TRUE)
+setwd(data_path)
+```
+
+### Functions
+
+```{r}
+## getAllAncestors Function
+## description: Get Mapping for all disease and tissues to high level contexts
+getAllAncestors <- function(n) {
+  parents <- ont[grep(paste0("^", n, "$"), ont[,1]),3]
+  if (length(parents) == 0) return(n)
+  anc <- c(n)
+  for (p in parents) {
+    anc <- c(anc, getAllAncestors(p))
+    #print(des)
+  }
+  anc <- unique(anc)
+  return(anc)
+}
+getAllDescendants <- function(n) {
+  childs <- ont[grep(paste0("^", n, "$"), ont[,3]),1]
+  
+  if (length(childs) == 0) return(n)
+  des <- c(n)
+  for (c in childs) {
+    des <- c(des, getAllDescendants(c))
+    #print(des)
+  }
+  des <- unique(des)
+  return(des)
+}
+```
+
+
+### Read in the ontology file.
+```{r}
+ont <- read.table(ontologyfile, sep = "\t", header = F, fill = T)
+head(ont)
+sum(ont[,4]=="BTO")
+
+terms <- unique(unlist(ont[,c(1,3)])) # Get unique terms in the ontology
+```
+
+# Read in the `allTissues_*` files. This has all tissue+disease (i.e. contexts) used in this project. We want to determine a set of nodes in the ontology that can encompass all these terms
+```{r}
+allTissues_mirs <- readLines(allTissuesMirsFile)
+allTissues_genes <- readLines(allTissuesGenesFile)
+allTissues_novelmirs <- readLines(allTissuesNovelmirsFile)
+allTissues <- unique(unlist(list(allTissues_novelmirs, allTissues_genes, allTissues_mirs)))
+allTerms <- unique(unlist(strsplit(allTissues, "_")))
+head(allTerms)
+```
+
+# Get ancestorList
+```{r}
+ancList <- lapply(allTerms, function(x) {
+  return(getAllAncestors(x))
+})
+names(ancList) <- allTerms
+head(ancList)
+```
+
+#Manually curated cutoff nodes.
+
+```{r}
+cutoffNodes <- c("connective.tissue", "gland", "viscus", "head", "bone.marrow",
+                 "brain", "heart", "kidney", "bladder",
+                 "lung", "bronchus", "immune.system", "blood", "serum", "lymph.node", "tonsil",
+                 "male.reproductive.system", "female.reproductive.system",
+                 "skeletal.muscle", "mediastinum", "retroperitoneum",
+                 "trunk", "eye", "tongue", "bile.duct", "placenta", "limb",
+                 "tuberculosis", "chronic.fatigue.syndrome", "marginal.zone.b.cell.lymphoma",
+                 "tumor", "sarcoma", "malignant.mesothelioma", "carcinoma", "low.grade.glioma",
+                 "cancer", "pheochromocytoma", "skin", "liver.cirrhosis", "bone.disease",
+                 "cardiovascular.system", "endothelial.cell", "epithelial.cell", "nervous.system",
+                 "embryonic.structure", "trachea", "parkinsons.disease")
+```
+
+# Determine Term Coverage
+
+```{r}
+termCoverage <- function(n) {
+  names(which(sapply(getAllDescendants(n), function(x) if (x %in% allTerms) return(T) else return(F))))
+}
+
+head(allTerms)
+uncoveredTerms <- setdiff(allTerms, unique(unlist(lapply(cutoffNodes, termCoverage))))
+head(uncoveredTerms)
+write.table(uncoveredTerms, uncoveredTermsFile, row.names = F, col.names = F, sep = "\t", quote = F)
+```
+
+# Determine Missing Terms
+
+```{r}
+missingFromMirs <- intersect(uncoveredTerms, unique(unlist(strsplit(allTissues_mirs, "_"))))
+missingFromNovel <- intersect(uncoveredTerms, unique(unlist(strsplit(allTissues_novelmirs, "_"))))
+missingFromGenes <- intersect(uncoveredTerms, unique(unlist(strsplit(allTissues_genes, "_"))))
+missingFromMirs
+missingFromNovel
+missingFromGenes
+```
+
+#Create the data frame that maps the low-level to high-level terms
+```{r}
+head(allTissues)
+lowToHighDF <- lapply(allTissues, function(x) {
+  splt <- strsplit(x, "_")[[1]]
+  if (length(splt) == 2) {
+    vec <- cutoffNodes[which(cutoffNodes %in% getAllAncestors(splt[2]))]
+  } else {
+    vec <- cutoffNodes[which(cutoffNodes %in% getAllAncestors(splt))]
+  }
+  return(data.frame(lowLevel = rep(x, length(vec)), highLevel = vec))
+})
+lowToHighDF <- do.call(rbind, lowToHighDF)
+head(lowToHighDF)
+
+```
+
+#Creating the tissue grouping file that indicates whether the term is normal or diseased
+```{r}
+highLevelTerms <- unique(lowToHighDF$highLevel)
+tissueGroupings <- data.frame(Tissue = highLevelTerms, Group = sapply(highLevelTerms, function(x) {
+  anc <- getAllAncestors(x)
+  if ("whole.body" %in% anc) return("normal")
+  else return("disease")
+}))
+row.names(tissueGroupings) <- 1:nrow(tissueGroupings)
+head(tissueGroupings)
+```
+
+#Writing Tissue mapping and Tissue grouping files.
+
+```{r}
+write.table(lowToHighDF, allTissueMappingsFile, row.names = F, col.names = T, sep = "\t", quote = F)
+write.table(tissueGroupings, allTissueGroupingsFile, row.names = F, col.names = T, sep = "\t", quote = F)
+```
