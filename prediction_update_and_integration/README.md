@@ -1,4 +1,4 @@
-# mirdip5 pipeline
+# mirDip 5.2 Nextflow pipeline for processing miRNA and mRNA rawdata
 
 Runs according to `nextflow.config` configuration file, which controls things such as the source data directory, the benchmark/evaluation pairs, etc. It is crucial to update the `params` block of this configuration file in full to ensure correct results:
 
@@ -21,15 +21,15 @@ params {
 }
 ```
 
-## How to run the pipeline
+## How to run the Nextflow pipeline
 
-The following command will run the pipeline on `ijcluster`, produce an HTML report and timeline, as well as a `trace.txt` file with similar information about resource usage:
+The following command will run the pipeline on a `cluster`, produce an HTML report and timeline, as well as a `trace.txt` file with similar information about resource usage:
 
 ```bash
 nextflow run map_ids.nf -profile ijcluster -with-report -with-timeline -with-trace
 ```
 
-The ID mapping process relies on downloaded files `hgnc_complete_set.txt` as well as downloads from Ensembl to function correctly. Scripts in the `scripts/` directory will all depend on the libraries represented in the `mirbaseconverter.yml` conda environment file. Once that environment has been created and activated, you may inspect the options of each script and run each script independently simply by running it on the command line with the `-h` or `--help` options.
+The `ijcluster` profile file defines the local parameters for the nextflow run. The ID mapping process relies on downloaded files `hgnc_complete_set.txt` as well as downloads from Ensembl to function correctly. Scripts in the `scripts/` directory will all depend on the libraries represented in the `mirbaseconverter.yml` conda environment file. Once that environment has been created and activated, you may inspect the options of each script and run each script independently simply by running it on the command line with the `-h` or `--help` options.
 
 # running Noisy-OR integration script
 
@@ -39,7 +39,22 @@ The following command run on the results that are placed in the `params.publishD
 # you may construct this environment from the mirbaseconverter.yml file in this repository
 conda activate mirbaseconverter;
 Rscript scripts/mirdip5_run_noisyOR.R \
-        -c `pwd` \
-        -d ./benchmarks_platinum_large_nodups/ \
-        -o mirdip5_noisyor_final.txt
+    	-c `pwd` \
+    	-d ./benchmarks_platinum_large_nodups/ \
+    	-o mirdip5_noisyor_final.txt
+```
+
+# How to run the Nextflow pipeline for genes and miRNA
+
+## How to run the pipeline for genes
+
+```bash
+nextflow run rnaseq --genome GRCh38 --input /samplesheet.csv --star_index false --gene_bed false --aligner star_rsem --outdir /outputdirectory --save_merged_fastq -profile ijcluster
+```
+
+
+## How to run the pipeline for miRNA
+
+```bash
+nextflow run nf-core/smrnaseq -profile ijcluster --input /samplesheet.csv --outdir /outputdirectory --genome GRCh38 --protocol qiaseq --mirtrace_species hsa -r gittak_ac_config
 ```
