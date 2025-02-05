@@ -58,3 +58,18 @@ nextflow run rnaseq --genome GRCh38 --input /samplesheet.csv --star_index false 
 ```bash
 nextflow run nf-core/smrnaseq -profile ijcluster --input /samplesheet.csv --outdir /outputdirectory --genome GRCh38 --protocol qiaseq --mirtrace_species hsa -r gittak_ac_config
 ```
+
+# How to run the Nextflow pipeline for genes and miRNA
+
+## How to run the pipeline for genes
+
+```bash
+nextflow run rnaseq --genome GRCh38 --input /samplesheet.csv --star_index false --gene_bed false --aligner star_rsem --outdir /outputdirectory --save_merged_fastq -profile ijcluster
+```
+
+
+## How to run the pipeline for miRNA
+
+```bash
+nextflow run nf-core/smrnaseq -profile ijcluster --input /samplesheet.csv --outdir /outputdirectory --genome GRCh38 --protocol qiaseq --mirtrace_species hsa -r gittak_ac_config
+```
